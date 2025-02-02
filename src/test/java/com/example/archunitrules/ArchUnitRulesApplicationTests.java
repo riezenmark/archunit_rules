@@ -4,35 +4,49 @@ import com.example.archunitrules.common.exception.BaseParametrizedException;
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.*;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
+import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.lang.ArchCondition;
 import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
 import com.tngtech.archunit.library.Architectures.LayeredArchitecture;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
 import jakarta.validation.Valid;
 import lombok.Generated;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Controller;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
 
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
 
+import static com.tngtech.archunit.base.DescribedPredicate.anyElementThat;
 import static com.tngtech.archunit.core.domain.JavaClass.Predicates.resideInAPackage;
 import static com.tngtech.archunit.core.domain.properties.CanBeAnnotated.Predicates.annotatedWith;
 import static com.tngtech.archunit.core.domain.properties.CanBeAnnotated.Predicates.metaAnnotatedWith;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.*;
 import static com.tngtech.archunit.library.Architectures.layeredArchitecture;
+import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.slices;
 
 class ArchUnitRulesApplicationTests {
-    JavaClasses classes = new ClassFileImporter().importPackages("com.example.archunitrules");
+    JavaClasses classes = new ClassFileImporter()
+            .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
+            .importPackages("com.example.archunitrules");
 
     @Test
     void properlyNamedServiceInterfacesHasProperlyNamedServiceImplementations() {
@@ -436,5 +450,150 @@ class ArchUnitRulesApplicationTests {
                 "com.example.archunitrules.handler"
         );
         noTopLevelLayerPackagesRule.allowEmptyShould(true).check(classes);
+    }
+
+    @Test
+    void repositoriesProvidesOptionalsOrCollections() {
+        ArchRule repositoryMethodsReturnTypesRule = methods()
+                .that().areDeclaredInClassesThat().areAssignableTo(JpaRepository.class)
+                .should().haveRawReturnType(thatIsCollection())
+                .orShould().haveRawReturnType(Optional.class)
+                .orShould().haveRawReturnType(Page.class);
+        ArchRule pageableMethodArgumentsRule = methods()
+                .that().areDeclaredInClassesThat().areAssignableTo(JpaRepository.class)
+                .and().haveRawReturnType(Page.class)
+                .should(haveLastParameterOfType(Pageable.class));
+        repositoryMethodsReturnTypesRule.allowEmptyShould(true).check(classes);
+        pageableMethodArgumentsRule.allowEmptyShould(true).check(classes);
+    }
+
+    private DescribedPredicate<JavaClass> thatIsCollection() {
+        return new DescribedPredicate<>("is collection") {
+            @Override
+            public boolean test(JavaClass javaClass) {
+                return javaClass.isAssignableTo(Collection.class);
+            }
+        };
+    }
+
+    private ArchCondition<JavaMethod> haveLastParameterOfType(Class<?> expectedType) {
+        return new ArchCondition<>("last parameter of type " + expectedType.getName()) {
+            @Override
+            public void check(JavaMethod item, ConditionEvents events) {
+                List<JavaParameter> parameters = item.getParameters();
+                if (parameters.isEmpty()) {
+                    events.add(SimpleConditionEvent.violated(item, "there are no parameters"));
+                    return;
+                }
+                JavaParameter lastParameter = parameters.getLast();
+                if (!lastParameter.getRawType().isAssignableTo(expectedType)) {
+                    String message = String.format(
+                            "Method %s has last parameter of type %s, but expected %s",
+                            item.getFullName(),
+                            lastParameter.getType().getName(),
+                            expectedType.getName()
+                    );
+                    events.add(SimpleConditionEvent.violated(item, message));
+                }
+            }
+        };
+    }
+
+    @Test
+    void noCircularDependencies() {
+        ArchRule noCircularDependenciesRule = slices()
+                .matching("com.example.archunitrules.(*)..")
+                .should().beFreeOfCycles()
+                .ignoreDependency(
+                        DescribedPredicate.alwaysTrue(),
+                        resideInAPackage("..request..")
+                )
+                .ignoreDependency(
+                        DescribedPredicate.alwaysTrue(),
+                        resideInAPackage("..response..")
+                )
+                .because("laskdfjlaskfd");
+        noCircularDependenciesRule.allowEmptyShould(true).check(classes);
+    }
+
+    @Test
+    void noEntitiesInControllers() {
+        ArchRule controllerMethodEntitiesRule = methods()
+                .that().areDeclaredInClassesThat().resideInAPackage("..controller..")
+                .should().notHaveRawReturnType(annotatedWith(Entity.class))
+                .andShould().notHaveRawReturnType(resideInAPackage("..entity"))
+                .andShould(notHave())
+                .andShould().notHaveRawParameterTypes(anyElementThat(annotatedWith(Entity.class)))
+                .andShould().notHaveRawParameterTypes(anyElementThat(resideInAPackage("..entity")))
+                .because("lasdkflaskf");
+        controllerMethodEntitiesRule.allowEmptyShould(true).check(classes);
+    }
+
+    private ArchCondition<? super JavaMethod> notHave() {
+        return new ArchCondition<JavaMethod>("not haven") {
+
+            @Override
+            public void check(JavaMethod item, ConditionEvents events) {
+                System.out.println(item.getTypeParameters());
+                System.out.println(item.getReturnType());
+            }
+        };
+    }
+
+    @Test
+    void fieldInjectionNotUsed() {
+        noFields()
+                .should().beAnnotatedWith(Autowired.class)
+                .because("blablabla")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void controllerMethodsAreAnnotatedWithOpenapiAnnotations() {
+        methods().that().areMetaAnnotatedWith(RequestMapping.class)
+                .should().beAnnotatedWith(Operation.class)
+                .andShould().beMetaAnnotatedWith(ApiResponse.class)
+                .because("blablabla")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void entitiesHaveEqualsAndHashCode() {
+        classes().that().areAnnotatedWith(Entity.class)
+                .should(haveEqualsMethod())
+                .andShould(haveHashCodeMethod())
+                .because("https://jpa-buddy.com/blog/hopefully-the-final-article-about-equals-and-hashcode-for-jpa-entities-with-db-generated-ids/")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    private ArchCondition<JavaClass> haveEqualsMethod() {
+        return new ArchCondition<>("equals method") {
+            @Override
+            public void check(JavaClass item, ConditionEvents events) {
+                item.tryGetMethod("equals", Object.class)
+                        .filter(javaMethod -> javaMethod.getReturnType().getName().equals("boolean"))
+                        .ifPresentOrElse(
+                                javaMethod -> {},
+                                () -> events.add(SimpleConditionEvent.violated(item, "no equals method"))
+                        );
+            }
+        };
+    }
+
+    private ArchCondition<? super JavaClass> haveHashCodeMethod() {
+        return new ArchCondition<>("hashCode method") {
+            @Override
+            public void check(JavaClass item, ConditionEvents events) {
+                item.tryGetMethod("hashCode")
+                        .filter(javaMethod -> javaMethod.getReturnType().getName().equals("int"))
+                        .ifPresentOrElse(
+                                javaMethod -> {},
+                                () -> events.add(SimpleConditionEvent.violated(item, "no hashCode method"))
+                        );
+            }
+        };
     }
 }
